@@ -1,0 +1,28 @@
+// raize_auth/random: cryptographically secure random bytes from the OS.
+// thread: any.
+//
+// Linux: getrandom(2) through the `syscall` builtin, x86-64 only (reports/003).
+// Windows: not available yet; every call returns RA_E_UNSUPPORTED.
+// The @test interpreter cannot run `syscall`, so code that needs real
+// randomness is tested by the built programs in tests/ (mbuild test-programs).
+
+import "status";
+import "random_linux.mettle" if linux;
+import "random_windows.mettle" if windows;
+
+/// Fills a buffer with secure random bytes.
+///
+/// in:      p, n     the buffer (n >= 0)
+/// returns: RA_OK, RA_E_IO when the kernel call fails, RA_E_UNSUPPORTED on Windows
+/// owns:    writes p only
+/// thread:  any
+/// example:
+///   var salt: uint8[16]; if (ra_random_bytes(&salt[0], 16) != RA_OK) { return 1; }
+export fn ra_random_bytes(p: uint8*, n: int64) -> int32 {
+  if (n < 0) { return RA_E_USAGE; }
+  if (n == 0) { return RA_OK; }
+  var rc: int32 = rax_os_random(p, n);
+  if (rc == -2) { return RA_E_UNSUPPORTED; }
+  if (rc != 0) { return RA_E_IO; }
+  return RA_OK;
+}

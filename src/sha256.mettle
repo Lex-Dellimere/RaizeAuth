@@ -1,0 +1,244 @@
+// raize_auth/sha256: SHA-256 (FIPS 180-4), streaming and one-shot.
+// thread: pure functions over caller memory; a RaSha256 belongs to one thread
+// at a time, separate contexts are independent.
+//
+// No dependency beyond std/mem, so a tool that needs only hashing (mbuild)
+// can `import "raize_auth/sha256"` on its own.
+
+import "std/mem";
+import "status";
+import "encode";
+
+/// Bytes in a SHA-256 digest.
+export const RA_SHA256_LEN: int32 = 32;
+
+/// A streaming SHA-256 state. Zero it with ra_sha256_init; copy it by value to fork a prefix.
+export struct RaSha256 {
+  h: uint32[8];
+  buf: uint8[64];
+  buf_len: int64;
+  total: uint64;
+}
+
+const RAX_K: uint32[64] = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+];
+
+fn rax_rotr(x: uint32, n: uint32) -> uint32 {
+  return (x >> n) | (x << ((uint32)32 - n));
+}
+
+fn rax_block(h: uint32*, p: uint8*) {
+  var w: uint32[64];
+  var i: int64 = 0;
+  while (i < 16) {
+    w[i] = ((uint32)p[i * 4] << (uint32)24) | ((uint32)p[i * 4 + 1] << (uint32)16) | ((uint32)p[i * 4 + 2] << (uint32)8) | (uint32)p[i * 4 + 3];
+    i = i + 1;
+  }
+  while (i < 64) {
+    var x: uint32 = w[i - 15];
+    var y: uint32 = w[i - 2];
+    var s0: uint32 = rax_rotr(x, 7) ^ rax_rotr(x, 18) ^ (x >> (uint32)3);
+    var s1: uint32 = rax_rotr(y, 17) ^ rax_rotr(y, 19) ^ (y >> (uint32)10);
+    w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    i = i + 1;
+  }
+  var a: uint32 = h[0];
+  var b: uint32 = h[1];
+  var c: uint32 = h[2];
+  var d: uint32 = h[3];
+  var e: uint32 = h[4];
+  var f: uint32 = h[5];
+  var g: uint32 = h[6];
+  var hh: uint32 = h[7];
+  i = 0;
+  while (i < 64) {
+    var t1: uint32 = hh + (rax_rotr(e, 6) ^ rax_rotr(e, 11) ^ rax_rotr(e, 25)) + ((e & f) ^ (~e & g)) + RAX_K[i] + w[i];
+    var t2: uint32 = (rax_rotr(a, 2) ^ rax_rotr(a, 13) ^ rax_rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+    hh = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+    i = i + 1;
+  }
+  h[0] = h[0] + a;
+  h[1] = h[1] + b;
+  h[2] = h[2] + c;
+  h[3] = h[3] + d;
+  h[4] = h[4] + e;
+  h[5] = h[5] + f;
+  h[6] = h[6] + g;
+  h[7] = h[7] + hh;
+}
+
+/// Starts (or restarts) a SHA-256 computation.
+///
+/// in:      c        the state to reset
+/// returns: nothing
+/// owns:    c is the caller's
+/// thread:  any (one thread per state)
+/// example:
+///   var c: RaSha256; ra_sha256_init(&c);
+export fn ra_sha256_init(c: RaSha256*) {
+  c->h[0] = 0x6a09e667;
+  c->h[1] = 0xbb67ae85;
+  c->h[2] = 0x3c6ef372;
+  c->h[3] = 0xa54ff53a;
+  c->h[4] = 0x510e527f;
+  c->h[5] = 0x9b05688c;
+  c->h[6] = 0x1f83d9ab;
+  c->h[7] = 0x5be0cd19;
+  c->buf_len = 0;
+  c->total = 0;
+}
+
+/// Feeds bytes into a SHA-256 computation.
+///
+/// in:      c        a state from ra_sha256_init
+///          p, n     the bytes (n >= 0; p may be 0 when n is 0)
+/// returns: nothing
+/// owns:    reads p; keeps no reference to it
+/// thread:  any (one thread per state)
+/// example:
+///   ra_sha256_update(&c, s.chars, (int64)s.length);
+export fn ra_sha256_update(c: RaSha256*, p: uint8*, n: int64) {
+  var i: int64 = 0;
+  c->total = c->total + (uint64)n;
+  if (c->buf_len > 0) {
+    while (i < n && c->buf_len < 64) {
+      c->buf[c->buf_len] = p[i];
+      c->buf_len = c->buf_len + 1;
+      i = i + 1;
+    }
+    if (c->buf_len < 64) { return; }
+    rax_block(&c->h[0], &c->buf[0]);
+    c->buf_len = 0;
+  }
+  while (n - i >= 64) {
+    rax_block(&c->h[0], &p[i]);
+    i = i + 64;
+  }
+  while (i < n) {
+    c->buf[c->buf_len] = p[i];
+    c->buf_len = c->buf_len + 1;
+    i = i + 1;
+  }
+}
+
+/// Finishes a SHA-256 computation and writes the digest.
+///
+/// in:      c        a state fed with ra_sha256_update
+///          out      room for 32 bytes
+/// returns: nothing
+/// owns:    writes out; c is spent (call ra_sha256_init to reuse it)
+/// thread:  any (one thread per state)
+/// example:
+///   var d: uint8[32]; ra_sha256_final(&c, &d[0]);
+export fn ra_sha256_final(c: RaSha256*, out: uint8*) {
+  var bits: uint64 = c->total * (uint64)8;
+  var pad: uint8[72];
+  memset(&pad[0], 0, 72);
+  pad[0] = (uint8)128;
+  var padn: int64 = 56 - c->buf_len;
+  if (padn <= 0) { padn = padn + 64; }
+  var i: int64 = 0;
+  while (i < 8) {
+    pad[padn + i] = (uint8)((bits >> (uint64)((7 - i) * 8)) & (uint64)255);
+    i = i + 1;
+  }
+  var keep: uint64 = c->total;
+  ra_sha256_update(c, &pad[0], padn + 8);
+  c->total = keep;
+  i = 0;
+  while (i < 8) {
+    out[i * 4] = (uint8)(c->h[i] >> (uint32)24);
+    out[i * 4 + 1] = (uint8)((c->h[i] >> (uint32)16) & (uint32)255);
+    out[i * 4 + 2] = (uint8)((c->h[i] >> (uint32)8) & (uint32)255);
+    out[i * 4 + 3] = (uint8)(c->h[i] & (uint32)255);
+    i = i + 1;
+  }
+}
+
+/// SHA-256 of a byte range in one call.
+///
+/// in:      p, n     the bytes
+///          out      room for 32 bytes
+/// returns: nothing
+/// owns:    writes out; no allocation
+/// thread:  any
+/// example:
+///   var d: uint8[32]; ra_sha256(data, len, &d[0]);
+export fn ra_sha256(p: uint8*, n: int64, out: uint8*) {
+  var c: RaSha256;
+  ra_sha256_init(&c);
+  ra_sha256_update(&c, p, n);
+  ra_sha256_final(&c, out);
+}
+
+/// SHA-256 of a string's bytes.
+///
+/// in:      s        any bytes
+///          out      room for 32 bytes
+/// returns: nothing
+/// owns:    writes out; no allocation
+/// thread:  any
+/// example:
+///   var d: uint8[32]; ra_sha256_str(token, &d[0]);
+export fn ra_sha256_str(s: string, out: uint8*) {
+  ra_sha256(s.chars, (int64)s.length, out);
+}
+
+/// SHA-256 of a string as 64 lowercase hex digits, in a RaText.
+///
+/// in:      s        any bytes
+///          out      the RaText to fill
+/// returns: nothing
+/// owns:    writes out; no allocation
+/// thread:  any
+/// example:
+///   var h: RaText; ra_sha256_hex(manifest, &h); println(ra_text_str(&h));
+export fn ra_sha256_hex(s: string, out: RaText*) {
+  var d: uint8[32];
+  ra_sha256_str(s, &d[0]);
+  out->len = (int32)ra_hex_encode(&d[0], 32, &out->bytes[0]);
+}
+
+fn rax_hex_is(s: string, want: string) -> bool {
+  var t: RaText;
+  ra_sha256_hex(s, &t);
+  return ra_text_str(&t) == want;
+}
+
+@test fn t_ra_sha256_fips() -> int32 {
+  if (!rax_hex_is("abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")) { return 1; }
+  if (!rax_hex_is("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")) { return 2; }
+  if (!rax_hex_is("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")) { return 3; }
+  return 0;
+}
+
+@test fn t_ra_sha256_streaming_matches() -> int32 {
+  // Feed the 448-bit message in uneven pieces across block boundaries.
+  var m: string = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopqabcdbcdecdefdefgefgh";
+  var one: uint8[32];
+  ra_sha256_str(m, &one[0]);
+  var c: RaSha256;
+  ra_sha256_init(&c);
+  ra_sha256_update(&c, m.chars, 3);
+  ra_sha256_update(&c, &m.chars[3], 61);
+  ra_sha256_update(&c, &m.chars[64], (int64)m.length - 64);
+  var two: uint8[32];
+  ra_sha256_final(&c, &two[0]);
+  if (memcmp(&one[0], &two[0], 32) != 0) { return 1; }
+  return 0;
+}

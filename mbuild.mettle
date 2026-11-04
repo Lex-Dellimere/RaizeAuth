@@ -1,0 +1,61 @@
+import "mbuild/api";
+
+fn project() {
+  mb_package("raize_auth", "0.1.0");
+  mb_meta("description", "pure-Mettle authentication and sessions: PBKDF2 passwords, hashed tokens, CSRF, lockout, device-code login");
+  mb_import_root("src");
+}
+
+// test-programs: build and run every program in tests/ in debug and --release
+//
+// The programs call getrandom through the `syscall` builtin, which the
+// `mbuild test` interpreter cannot run, so they are built and run here.
+// They are not bins of the package (mbuild has no test-program declaration
+// yet, reports/002). The compiler is $METTLE, else `mettle` on PATH.
+//   mbuild test-programs              both profiles
+//   mbuild test-programs --debug      debug only
+//   mbuild test-programs --release    release only
+fn cmd_test_programs(a: MbArgs*) -> int32 {
+  var mettle: string = mb_env("METTLE");
+  if (mettle == "") { mettle = "mettle"; }
+  var progs: string[2] = ["vectors", "e2e"];
+  var profiles: string[2] = ["debug", "release"];
+  var failed: int32 = 0;
+  for pi in 0..2 {
+    var prof: string = profiles[pi];
+    if (prof == "debug" && mb_flag(a, "--release")) { continue; }
+    if (prof == "release" && mb_flag(a, "--debug")) { continue; }
+    var dir: string = "build/tests/" + prof;
+    mb_mkdirs(dir);
+    for i in 0..2 {
+      var name: string = progs[i];
+      var out: string = mb_root() + "/" + dir + "/" + name;
+      var c: MbCmd* = mb_cmd(mettle);
+      mb_cmd_arg(c, "--build");
+      if (prof == "release") { mb_cmd_arg(c, "--release"); }
+      mb_cmd_arg(c, name + ".mettle");
+      mb_cmd_arg(c, "-o");
+      mb_cmd_arg(c, out);
+      mb_cmd_cwd(c, mb_root() + "/tests");
+      var rc: int32 = mb_cmd_run(c);
+      if (rc != 0) {
+        mb_warn("tests/" + name + ".mettle does not build (" + prof + ")");
+        failed = failed + 1;
+        continue;
+      }
+      mb_say("     Running " + dir + "/" + name);
+      var r: MbCmd* = mb_cmd(out);
+      rc = mb_cmd_run(r);
+      if (rc != 0) {
+        mb_warn(dir + "/" + name + " failed (exit {rc})");
+        failed = failed + 1;
+      }
+    }
+  }
+  if (failed > 0) {
+    mb_say("test-programs: FAILED ({failed})");
+    return 1;
+  }
+  mb_say("test-programs: ok");
+  return 0;
+}

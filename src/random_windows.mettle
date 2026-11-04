@@ -1,0 +1,15 @@
+// raize_auth/random_windows: no pure-Mettle random source on Windows yet
+// (reports/003). Internal to raize_auth.
+// thread: any.
+
+/// Always fails on Windows: raize_auth has no OS random source there yet.
+///
+/// in:      p, n     the buffer (untouched)
+/// returns: -2 (unsupported)
+/// owns:    nothing
+/// thread:  any
+/// example:
+///   if (rax_os_random(&b[0], 32) != 0) { return RA_E_IO; }
+export fn rax_os_random(p: uint8*, n: int64) -> int32 {
+  return -2;
+}

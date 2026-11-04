@@ -1,0 +1,2 @@
+import "std/io";
+fn main() -> int32 { println("e2e: placeholder"); return 0; }

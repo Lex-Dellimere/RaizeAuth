@@ -1,0 +1,250 @@
+// raize_auth/encode: lowercase hex and unpadded base64url (RFC 4648 §5), plus
+// RaText, the fixed-size text buffer every token, code and encoded hash is
+// returned in (no heap, nothing to free).
+// thread: pure functions over caller memory; safe on any thread.
+
+import "std/mem";
+import "std/conv";
+import "status";
+
+/// Capacity of RaText, in bytes. Holds any token, code or encoded hash raize_auth makes.
+export const RA_TEXT_CAP: int32 = 160;
+
+/// A short text value owned by the caller: a token, a user code, an encoded hash.
+/// `bytes[0..len]` is the text (ASCII, not nul-terminated).
+export struct RaText {
+  bytes: uint8[160];
+  len: int32;
+}
+
+/// Views a RaText as a string.
+///
+/// in:      t        a filled RaText
+/// returns: a view of t's bytes
+/// owns:    the view borrows t; it is valid while t is, never free it.
+///          Copy it (e.g. "" + s) to keep it past t
+/// thread:  any
+/// example:
+///   println("token: {ra_text_str(&tok)}");
+export fn ra_text_str(t: RaText*) -> string {
+  return str_from_bytes((cstring)&t->bytes[0], (int64)t->len);
+}
+
+/// Sets a RaText from a string.
+///
+/// in:      t        destination
+///          s        at most RA_TEXT_CAP bytes
+/// returns: RA_OK, or RA_E_FULL when s is too long (t is then empty)
+/// owns:    copies s; the caller keeps s
+/// thread:  any
+/// example:
+///   var t: RaText; ra_text_set(&t, stored_hash);
+export fn ra_text_set(t: RaText*, s: string) -> int32 {
+  t->len = 0;
+  if (s.length > (uint64)RA_TEXT_CAP) { return RA_E_FULL; }
+  if (s.length > 0) { memcpy(&t->bytes[0], s.chars, (int64)s.length); }
+  t->len = (int32)s.length;
+  return RA_OK;
+}
+
+fn rae_hex_digit(v: int32) -> uint8 {
+  if (v < 10) { return (uint8)(48 + v); }
+  return (uint8)(87 + v);
+}
+
+/// Hex-encodes bytes (lowercase).
+///
+/// in:      p, n     the bytes
+///          out      room for 2*n bytes
+/// returns: the number of bytes written (2*n)
+/// owns:    writes into the caller's out; no allocation
+/// thread:  any
+/// example:
+///   var hex: uint8[64]; ra_hex_encode(&digest[0], 32, &hex[0]);
+export fn ra_hex_encode(p: uint8*, n: int64, out: uint8*) -> int64 {
+  var i: int64 = 0;
+  while (i < n) {
+    var b: int32 = (int32)p[i];
+    out[i * 2] = rae_hex_digit(b >> 4);
+    out[i * 2 + 1] = rae_hex_digit(b & 15);
+    i = i + 1;
+  }
+  return n * 2;
+}
+
+fn rae_hex_val(c: int32) -> int32 {
+  if (c >= 48 && c <= 57) { return c - 48; }
+  if (c >= 97 && c <= 102) { return c - 87; }
+  if (c >= 65 && c <= 70) { return c - 55; }
+  return -1;
+}
+
+/// Decodes hex (either case).
+///
+/// in:      s        an even number of hex digits
+///          out      room for s.length/2 bytes
+/// returns: the byte count, or RA_E_INVALID for odd length or a non-hex digit
+/// owns:    writes into out; no allocation
+/// thread:  any
+/// example:
+///   var key: uint8[32]; var n: int64 = ra_hex_decode(hex, &key[0]);
+export fn ra_hex_decode(s: string, out: uint8*) -> int64 {
+  var n: int64 = (int64)s.length;
+  if (n % 2 != 0) { return (int64)RA_E_INVALID; }
+  var i: int64 = 0;
+  while (i < n / 2) {
+    var hi: int32 = rae_hex_val((int32)s.chars[i * 2]);
+    var lo: int32 = rae_hex_val((int32)s.chars[i * 2 + 1]);
+    if (hi < 0 || lo < 0) { return (int64)RA_E_INVALID; }
+    out[i] = (uint8)(hi * 16 + lo);
+    i = i + 1;
+  }
+  return n / 2;
+}
+
+fn rae_b64_char(v: uint32) -> uint8 {
+  var x: int32 = (int32)(v & (uint32)63);
+  if (x < 26) { return (uint8)(65 + x); }
+  if (x < 52) { return (uint8)(97 + x - 26); }
+  if (x < 62) { return (uint8)(48 + x - 52); }
+  if (x == 62) { return (uint8)45; }
+  return (uint8)95;
+}
+
+/// Length of the unpadded base64url text for n bytes: ceil(4n/3).
+///
+/// in:      n        byte count (>= 0)
+/// returns: the encoded length
+/// owns:    nothing
+/// thread:  any
+/// example:
+///   ra_b64url_len(32) == 43
+export fn ra_b64url_len(n: int64) -> int64 {
+  return (n * 4 + 2) / 3;
+}
+
+/// Base64url-encodes bytes without padding (RFC 4648 §5).
+///
+/// in:      p, n     the bytes
+///          out      room for ra_b64url_len(n) bytes
+/// returns: the number of bytes written
+/// owns:    writes into out; no allocation
+/// thread:  any
+/// example:
+///   var t: uint8[43]; ra_b64url_encode(&raw[0], 32, &t[0]);
+export fn ra_b64url_encode(p: uint8*, n: int64, out: uint8*) -> int64 {
+  var i: int64 = 0;
+  var o: int64 = 0;
+  while (i + 3 <= n) {
+    var v: uint32 = ((uint32)p[i] << (uint32)16) | ((uint32)p[i + 1] << (uint32)8) | (uint32)p[i + 2];
+    out[o] = rae_b64_char(v >> (uint32)18);
+    out[o + 1] = rae_b64_char(v >> (uint32)12);
+    out[o + 2] = rae_b64_char(v >> (uint32)6);
+    out[o + 3] = rae_b64_char(v);
+    i = i + 3;
+    o = o + 4;
+  }
+  var rest: int64 = n - i;
+  if (rest == 1) {
+    var v1: uint32 = (uint32)p[i] << (uint32)16;
+    out[o] = rae_b64_char(v1 >> (uint32)18);
+    out[o + 1] = rae_b64_char(v1 >> (uint32)12);
+    o = o + 2;
+  } else if (rest == 2) {
+    var v2: uint32 = ((uint32)p[i] << (uint32)16) | ((uint32)p[i + 1] << (uint32)8);
+    out[o] = rae_b64_char(v2 >> (uint32)18);
+    out[o + 1] = rae_b64_char(v2 >> (uint32)12);
+    out[o + 2] = rae_b64_char(v2 >> (uint32)6);
+    o = o + 3;
+  }
+  return o;
+}
+
+fn rae_b64_val(c: int32) -> int32 {
+  if (c >= 65 && c <= 90) { return c - 65; }
+  if (c >= 97 && c <= 122) { return c - 97 + 26; }
+  if (c >= 48 && c <= 57) { return c - 48 + 52; }
+  if (c == 45) { return 62; }
+  if (c == 95) { return 63; }
+  return -1;
+}
+
+/// Decodes unpadded base64url (strict: no '=', no whitespace, canonical tail bits).
+///
+/// in:      s        base64url text
+///          out      room for s.length*3/4 bytes
+/// returns: the byte count, or RA_E_INVALID for a bad character, a length of 4k+1,
+///          or non-zero trailing bits
+/// owns:    writes into out; no allocation
+/// thread:  any
+/// example:
+///   var salt: uint8[16]; var n: int64 = ra_b64url_decode(text, &salt[0]);
+export fn ra_b64url_decode(s: string, out: uint8*) -> int64 {
+  var n: int64 = (int64)s.length;
+  if (n % 4 == 1) { return (int64)RA_E_INVALID; }
+  var acc: uint32 = 0;
+  var bits: int32 = 0;
+  var o: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    var v: int32 = rae_b64_val((int32)s.chars[i]);
+    if (v < 0) { return (int64)RA_E_INVALID; }
+    acc = (acc << (uint32)6) | (uint32)v;
+    bits = bits + 6;
+    if (bits >= 8) {
+      bits = bits - 8;
+      out[o] = (uint8)((acc >> (uint32)bits) & (uint32)255);
+      o = o + 1;
+    }
+    i = i + 1;
+  }
+  if ((acc & (((uint32)1 << (uint32)bits) - (uint32)1)) != (uint32)0) { return (int64)RA_E_INVALID; }
+  return o;
+}
+
+fn rae_eq(p: uint8*, n: int64, want: string) -> bool {
+  if ((uint64)n != want.length) { return false; }
+  return memcmp(p, want.chars, n) == 0;
+}
+
+@test fn t_ra_hex() -> int32 {
+  var raw: uint8[4] = [0, 15, 160, 255];
+  var out: uint8[8];
+  var n: int64 = ra_hex_encode(&raw[0], 4, &out[0]);
+  if (!rae_eq(&out[0], n, "000fa0ff")) { return 1; }
+  var back: uint8[4];
+  if (ra_hex_decode("000FA0ff", &back[0]) != 4) { return 2; }
+  if (back[2] != (uint8)160) { return 3; }
+  if (ra_hex_decode("abc", &back[0]) != (int64)RA_E_INVALID) { return 4; }
+  if (ra_hex_decode("zz", &back[0]) != (int64)RA_E_INVALID) { return 5; }
+  return 0;
+}
+
+@test fn t_ra_b64url_rfc4648() -> int32 {
+  // RFC 4648 §10 vectors, unpadded.
+  var src: string = "foobar";
+  var out: uint8[16];
+  var n: int64 = ra_b64url_encode(src.chars, 1, &out[0]);
+  if (!rae_eq(&out[0], n, "Zg")) { return 1; }
+  n = ra_b64url_encode(src.chars, 2, &out[0]);
+  if (!rae_eq(&out[0], n, "Zm8")) { return 2; }
+  n = ra_b64url_encode(src.chars, 6, &out[0]);
+  if (!rae_eq(&out[0], n, "Zm9vYmFy")) { return 3; }
+  var raw: uint8[3] = [251, 255, 191];
+  n = ra_b64url_encode(&raw[0], 3, &out[0]);
+  if (!rae_eq(&out[0], n, "-_-_")) { return 4; }
+  var back: uint8[8];
+  if (ra_b64url_decode("Zm9vYg", &back[0]) != 4) { return 5; }
+  if (!rae_eq(&back[0], 4, "foob")) { return 6; }
+  if (ra_b64url_decode("Zm9vYh", &back[0]) != (int64)RA_E_INVALID) { return 7; }
+  if (ra_b64url_decode("Zm9=", &back[0]) != (int64)RA_E_INVALID) { return 8; }
+  if (ra_b64url_len(32) != 43 || ra_b64url_len(16) != 22) { return 9; }
+  return 0;
+}
+
+@test fn t_ra_text() -> int32 {
+  var t: RaText;
+  if (ra_text_set(&t, "hello") != RA_OK) { return 1; }
+  if (ra_text_str(&t) != "hello") { return 2; }
+  return 0;
+}

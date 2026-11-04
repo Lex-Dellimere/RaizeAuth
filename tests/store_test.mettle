@@ -1,0 +1,397 @@
+// tests/store_test: the RaStore contract (src/store.mettle) exercised through
+// the public ra_store_* / ra_token_* wrappers over a test-only in-memory
+// backend. A test program; `mbuild test` builds and runs it, `-r` in release.
+
+import "std/io";
+import "std/mem";
+import "raize_auth/auth";
+
+var g_fail: int32 = 0;
+
+fn check(name: string, ok: bool) {
+  if (!ok) {
+    g_fail = g_fail + 1;
+    println("FAIL " + name);
+  }
+}
+
+// ---- test-only in-memory backend (not exported) ----
+
+struct TstDb {
+  tokens: RaToken[16];
+  tok_used: int32[16];
+  counters: RaCounter[8];
+  ctr_used: int32[8];
+  creds: RaCredential[2];
+}
+
+fn tst_init(db: TstDb*) {
+  memset((rawptr)db, 0, (int64)sizeof(TstDb));
+  db->creds[0].owner = 1;
+  db->creds[0].disabled = 0;
+  db->creds[1].owner = 2;
+  db->creds[1].disabled = 1;
+}
+
+fn tst_tok_find(db: TstDb*, key: uint8*) -> int32 {
+  var i: int32 = 0;
+  while (i < 16) {
+    if (db->tok_used[i] != 0 && memcmp((rawptr)&db->tokens[i].key[0], (rawptr)key, 32) == 0) { return i; }
+    i = i + 1;
+  }
+  return -1;
+}
+
+fn tst_ctr_find(db: TstDb*, key: uint8*) -> int32 {
+  var i: int32 = 0;
+  while (i < 8) {
+    if (db->ctr_used[i] != 0 && memcmp((rawptr)&db->counters[i].key[0], (rawptr)key, 32) == 0) { return i; }
+    i = i + 1;
+  }
+  return -1;
+}
+
+fn tst_tok_put(ctx: rawptr, r: RaToken*) -> int32 {
+  var db: TstDb* = (TstDb*)ctx;
+  var i: int32 = tst_tok_find(db, &r->key[0]);
+  if (i < 0) {
+    var j: int32 = 0;
+    while (j < 16) {
+      if (db->tok_used[j] == 0) { i = j; break; }
+      j = j + 1;
+    }
+  }
+  if (i < 0) { return RA_E_FULL; }
+  memcpy((rawptr)&db->tokens[i], (rawptr)r, (int64)sizeof(RaToken));
+  db->tok_used[i] = 1;
+  return RA_OK;
+}
+
+fn tst_tok_get(ctx: rawptr, key: uint8*, out: RaToken*) -> int32 {
+  var db: TstDb* = (TstDb*)ctx;
+  var i: int32 = tst_tok_find(db, key);
+  if (i < 0) { return RA_E_NOT_FOUND; }
+  memcpy((rawptr)out, (rawptr)&db->tokens[i], (int64)sizeof(RaToken));
+  return RA_OK;
+}
+
+fn tst_tok_del(ctx: rawptr, key: uint8*) -> int32 {
+  var db: TstDb* = (TstDb*)ctx;
+  var i: int32 = tst_tok_find(db, key);
+  if (i < 0) { return RA_E_NOT_FOUND; }
+  db->tok_used[i] = 0;
+  memset((rawptr)&db->tokens[i], 0, (int64)sizeof(RaToken));
+  return RA_OK;
+}
+
+fn tst_tok_list(ctx: rawptr, owner: int64, skip: int64, out: RaToken*, cap: int32) -> int32 {
+  var db: TstDb* = (TstDb*)ctx;
+  var seen: int64 = 0;
+  var n: int32 = 0;
+  var i: int32 = 0;
+  while (i < 16 && n < cap) {
+    if (db->tok_used[i] != 0 && db->tokens[i].owner == owner) {
+      if (seen >= skip) {
+        memcpy((rawptr)&out[n], (rawptr)&db->tokens[i], (int64)sizeof(RaToken));
+        n = n + 1;
+      }
+      seen = seen + 1;
+    }
+    i = i + 1;
+  }
+  return n;
+}
+
+fn tst_ctr_get(ctx: rawptr, key: uint8*, out: RaCounter*) -> int32 {
+  var db: TstDb* = (TstDb*)ctx;
+  var i: int32 = tst_ctr_find(db, key);
+  if (i < 0) { return RA_E_NOT_FOUND; }
+  memcpy((rawptr)out, (rawptr)&db->counters[i], (int64)sizeof(RaCounter));
+  return RA_OK;
+}
+
+fn tst_ctr_put(ctx: rawptr, r: RaCounter*) -> int32 {
+  var db: TstDb* = (TstDb*)ctx;
+  var i: int32 = tst_ctr_find(db, &r->key[0]);
+  if (i < 0) {
+    var j: int32 = 0;
+    while (j < 8) {
+      if (db->ctr_used[j] == 0) { i = j; break; }
+      j = j + 1;
+    }
+  }
+  if (i < 0) { return RA_E_FULL; }
+  memcpy((rawptr)&db->counters[i], (rawptr)r, (int64)sizeof(RaCounter));
+  db->ctr_used[i] = 1;
+  return RA_OK;
+}
+
+fn tst_ctr_del(ctx: rawptr, key: uint8*) -> int32 {
+  var db: TstDb* = (TstDb*)ctx;
+  var i: int32 = tst_ctr_find(db, key);
+  if (i < 0) { return RA_E_NOT_FOUND; }
+  db->ctr_used[i] = 0;
+  memset((rawptr)&db->counters[i], 0, (int64)sizeof(RaCounter));
+  return RA_OK;
+}
+
+fn tst_cred_slot(login: string) -> int32 {
+  if (login == "ada") { return 0; }
+  if (login == "bob") { return 1; }
+  return -1;
+}
+
+fn tst_cred_get(ctx: rawptr, login: string, out: RaCredential*) -> int32 {
+  var db: TstDb* = (TstDb*)ctx;
+  var i: int32 = tst_cred_slot(login);
+  if (i < 0) { return RA_E_NOT_FOUND; }
+  memcpy((rawptr)out, (rawptr)&db->creds[i], (int64)sizeof(RaCredential));
+  return RA_OK;
+}
+
+fn tst_cred_set_hash(ctx: rawptr, owner: int64, h: CrPwHash*) -> int32 {
+  var db: TstDb* = (TstDb*)ctx;
+  var i: int32 = 0;
+  while (i < 2) {
+    if (db->creds[i].owner == owner) {
+      memcpy((rawptr)&db->creds[i].hash, (rawptr)h, (int64)sizeof(CrPwHash));
+      return RA_OK;
+    }
+    i = i + 1;
+  }
+  return RA_E_NOT_FOUND;
+}
+
+fn tst_prune(ctx: rawptr, now: int64, counter_before: int64) -> int32 {
+  var db: TstDb* = (TstDb*)ctx;
+  var removed: int32 = 0;
+  var i: int32 = 0;
+  while (i < 16) {
+    if (db->tok_used[i] != 0) {
+      var t: RaToken* = &db->tokens[i];
+      if (t->revoked != 0 || (t->expires > 0 && t->expires <= now)) {
+        db->tok_used[i] = 0;
+        memset((rawptr)t, 0, (int64)sizeof(RaToken));
+        removed = removed + 1;
+      }
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < 8) {
+    if (db->ctr_used[i] != 0) {
+      var c: RaCounter* = &db->counters[i];
+      if (c->locked_until <= now && c->window_start < counter_before) {
+        db->ctr_used[i] = 0;
+        memset((rawptr)c, 0, (int64)sizeof(RaCounter));
+        removed = removed + 1;
+      }
+    }
+    i = i + 1;
+  }
+  return removed;
+}
+
+fn tst_bind(st: RaStore*, db: TstDb*) {
+  st->ctx = (rawptr)db;
+  st->tok_put = &tst_tok_put;
+  st->tok_get = &tst_tok_get;
+  st->tok_del = &tst_tok_del;
+  st->tok_list = &tst_tok_list;
+  st->ctr_get = &tst_ctr_get;
+  st->ctr_put = &tst_ctr_put;
+  st->ctr_del = &tst_ctr_del;
+  st->cred_get = &tst_cred_get;
+  st->cred_set_hash = &tst_cred_set_hash;
+  st->prune = &tst_prune;
+}
+
+// ---- helpers ----
+
+// Fills a token with the SHA-256 of `secret` as its key.
+fn tst_make_token(t: RaToken*, secret: string, owner: int64) {
+  memset((rawptr)t, 0, (int64)sizeof(RaToken));
+  var h: CrSha256;
+  cr_token_hash(&h, secret);
+  memcpy((rawptr)&t->key[0], (rawptr)&h.b[0], 32);
+  t->owner = owner;
+}
+
+fn tst_key_of(out: CrSha256*, secret: string) {
+  cr_token_hash(out, secret);
+}
+
+fn main() -> int32 {
+  if (cr_init() != CR_OK) { println("FAIL cr_init"); return 1; }
+
+  var db: TstDb;
+  tst_init(&db);
+  var st: RaStore;
+  tst_bind(&st, &db);
+
+  // ---- completeness ----
+  check("complete after bind", ra_store_complete(&st));
+  var half: RaStore;
+  tst_bind(&half, &db);
+  half.prune = 0;
+  check("one field zero is incomplete", !ra_store_complete(&half));
+  var probe: RaToken;
+  check("incomplete tok_put is USAGE", ra_store_tok_put(&half, &probe) == RA_E_USAGE);
+
+  // ---- tokens ----
+  var t1: RaToken;
+  var t2: RaToken;
+  var t3: RaToken;
+  tst_make_token(&t1, "rat_test1", 1);
+  tst_make_token(&t2, "rat_test2", 1);
+  tst_make_token(&t3, "rat_test3", 2);
+  check("scope t1", ra_token_set_scope(&t1, "publish yank") == RA_OK);
+  check("label t1", ra_token_set_label(&t1, "CI publish") == RA_OK);
+  check("scope t2", ra_token_set_scope(&t2, "read") == RA_OK);
+  check("label t2", ra_token_set_label(&t2, "laptop") == RA_OK);
+  check("scope t3", ra_token_set_scope(&t3, "admin") == RA_OK);
+  check("label t3", ra_token_set_label(&t3, "bob token") == RA_OK);
+  check("put t1", ra_store_tok_put(&st, &t1) == RA_OK);
+  check("put t2", ra_store_tok_put(&st, &t2) == RA_OK);
+  check("put t3", ra_store_tok_put(&st, &t3) == RA_OK);
+
+  var got: RaToken;
+  check("get t1", ra_store_tok_get(&st, &t1.key[0], &got) == RA_OK);
+  check("get t1 owner", got.owner == 1);
+  check("get t1 scope", ra_token_scope(&got) == "publish yank");
+  check("get t1 label", ra_token_label(&got) == "CI publish");
+  var got3: RaToken;
+  check("get t3", ra_store_tok_get(&st, &t3.key[0], &got3) == RA_OK);
+  check("get t3 owner", got3.owner == 2);
+  check("get t3 scope", ra_token_scope(&got3) == "admin");
+
+  var unknown: CrSha256;
+  tst_key_of(&unknown, "rat_unknown");
+  var miss: RaToken;
+  check("get unknown", ra_store_tok_get(&st, &unknown.b[0], &miss) == RA_E_NOT_FOUND);
+
+  var page: RaToken[4];
+  check("list owner 1 count", ra_store_tok_list(&st, 1, 0, &page[0], 4) == 2);
+  check("list owner 2 count", ra_store_tok_list(&st, 2, 0, &page[0], 4) == 1);
+  check("list unknown owner", ra_store_tok_list(&st, 77, 0, &page[0], 4) == 0);
+
+  // put of the same key replaces; count stays the same.
+  var t1b: RaToken;
+  tst_make_token(&t1b, "rat_test1", 1);
+  check("scope t1b", ra_token_set_scope(&t1b, "publish") == RA_OK);
+  check("label t1b", ra_token_set_label(&t1b, "renamed") == RA_OK);
+  check("put t1 again", ra_store_tok_put(&st, &t1b) == RA_OK);
+  check("list after replace", ra_store_tok_list(&st, 1, 0, &page[0], 4) == 2);
+  var got1b: RaToken;
+  check("get replaced", ra_store_tok_get(&st, &t1.key[0], &got1b) == RA_OK);
+  check("replaced scope", ra_token_scope(&got1b) == "publish");
+  check("replaced label", ra_token_label(&got1b) == "renamed");
+
+  // ---- tok_list paging ----
+  var one: RaToken[1];
+  check("page cap1 skip0", ra_store_tok_list(&st, 1, 0, &one[0], 1) == 1);
+  check("page cap1 skip1", ra_store_tok_list(&st, 1, 1, &one[0], 1) == 1);
+  check("page cap1 skip2", ra_store_tok_list(&st, 1, 2, &one[0], 1) == 0);
+  check("list cap 0 is USAGE", ra_store_tok_list(&st, 1, 0, &one[0], 0) == RA_E_USAGE);
+  check("list skip -1 is USAGE", ra_store_tok_list(&st, 1, -1, &one[0], 1) == RA_E_USAGE);
+
+  // ---- delete ----
+  check("del t2", ra_store_tok_del(&st, &t2.key[0]) == RA_OK);
+  check("get after del", ra_store_tok_get(&st, &t2.key[0], &miss) == RA_E_NOT_FOUND);
+  check("del again", ra_store_tok_del(&st, &t2.key[0]) == RA_E_NOT_FOUND);
+  check("list after del", ra_store_tok_list(&st, 1, 0, &page[0], 4) == 1);
+
+  // ---- counters ----
+  var ck: CrSha256;
+  tst_key_of(&ck, "login:ada");
+  var c: RaCounter;
+  memcpy((rawptr)&c.key[0], (rawptr)&ck.b[0], 32);
+  c.failures = 3;
+  c.window_start = 1000;
+  c.locked_until = 2000;
+  check("ctr put", ra_store_ctr_put(&st, &c) == RA_OK);
+  var cg: RaCounter;
+  check("ctr get", ra_store_ctr_get(&st, &ck.b[0], &cg) == RA_OK);
+  check("ctr failures", cg.failures == 3);
+  check("ctr window_start", cg.window_start == 1000);
+  check("ctr locked_until", cg.locked_until == 2000);
+  c.failures = 4;
+  check("ctr put replace", ra_store_ctr_put(&st, &c) == RA_OK);
+  check("ctr get replaced", ra_store_ctr_get(&st, &ck.b[0], &cg) == RA_OK && cg.failures == 4);
+  check("ctr del", ra_store_ctr_del(&st, &ck.b[0]) == RA_OK);
+  check("ctr get after del", ra_store_ctr_get(&st, &ck.b[0], &cg) == RA_E_NOT_FOUND);
+  check("ctr del again", ra_store_ctr_del(&st, &ck.b[0]) == RA_E_NOT_FOUND);
+
+  // ---- credentials ----
+  var cred: RaCredential;
+  check("cred ada", ra_store_cred_get(&st, "ada", &cred) == RA_OK);
+  check("cred ada owner", cred.owner == 1);
+  check("cred ada enabled", cred.disabled == 0);
+  var cred_bob: RaCredential;
+  check("cred bob", ra_store_cred_get(&st, "bob", &cred_bob) == RA_OK);
+  check("cred bob owner", cred_bob.owner == 2);
+  check("cred bob disabled", cred_bob.disabled == 1);
+  check("cred nobody", ra_store_cred_get(&st, "nobody", &cred) == RA_E_NOT_FOUND);
+  check("cred empty login", ra_store_cred_get(&st, "", &cred) == RA_E_USAGE);
+
+  var h: CrPwHash;
+  check("hash pw", ra_password_hash(&h, "correct horse", CR_PW_INTERACTIVE) == RA_OK);
+  check("set_hash owner 1", ra_store_cred_set_hash(&st, 1, &h) == RA_OK);
+  var cred2: RaCredential;
+  check("cred ada again", ra_store_cred_get(&st, "ada", &cred2) == RA_OK);
+  check("cred owner kept", cred2.owner == 1);
+  check("stored hash verifies", ra_password_verify(&cred2.hash, "correct horse"));
+  check("stored hash rejects wrong", !ra_password_verify(&cred2.hash, "correct horsf"));
+  check("set_hash owner 99", ra_store_cred_set_hash(&st, 99, &h) == RA_E_NOT_FOUND);
+
+  // ---- prune (fresh store so the count is exact) ----
+  var db2: TstDb;
+  tst_init(&db2);
+  var st2: RaStore;
+  tst_bind(&st2, &db2);
+  var now: int64 = 1000000;
+
+  var pr: RaToken;
+  tst_make_token(&pr, "rat_revoked", 1);
+  pr.revoked = 1;
+  check("prune put revoked", ra_store_tok_put(&st2, &pr) == RA_OK);
+  var pe: RaToken;
+  tst_make_token(&pe, "rat_expired", 1);
+  pe.expires = now - 1;
+  check("prune put expired", ra_store_tok_put(&st2, &pe) == RA_OK);
+  var pl: RaToken;
+  tst_make_token(&pl, "rat_live", 1);
+  pl.expires = 0;
+  check("prune put live", ra_store_tok_put(&st2, &pl) == RA_OK);
+
+  var sk: CrSha256;
+  tst_key_of(&sk, "stale");
+  var cs: RaCounter;
+  memcpy((rawptr)&cs.key[0], (rawptr)&sk.b[0], 32);
+  cs.failures = 2;
+  cs.window_start = now - 5000;
+  cs.locked_until = 0;
+  check("prune put stale ctr", ra_store_ctr_put(&st2, &cs) == RA_OK);
+  var lk: CrSha256;
+  tst_key_of(&lk, "locked");
+  var cl: RaCounter;
+  memcpy((rawptr)&cl.key[0], (rawptr)&lk.b[0], 32);
+  cl.failures = 9;
+  cl.window_start = now - 5000;
+  cl.locked_until = now + 100;
+  check("prune put locked ctr", ra_store_ctr_put(&st2, &cl) == RA_OK);
+
+  check("prune removes exactly 3", ra_store_prune(&st2, now, now) == 3);
+  var chk: RaToken;
+  check("prune keeps live token", ra_store_tok_get(&st2, &pl.key[0], &chk) == RA_OK);
+  check("prune dropped revoked", ra_store_tok_get(&st2, &pr.key[0], &chk) == RA_E_NOT_FOUND);
+  check("prune dropped expired", ra_store_tok_get(&st2, &pe.key[0], &chk) == RA_E_NOT_FOUND);
+  var cchk: RaCounter;
+  check("prune keeps locked ctr", ra_store_ctr_get(&st2, &lk.b[0], &cchk) == RA_OK);
+  check("prune dropped stale ctr", ra_store_ctr_get(&st2, &sk.b[0], &cchk) == RA_E_NOT_FOUND);
+  check("prune again removes none", ra_store_prune(&st2, now, now) == 0);
+
+  if (g_fail != 0) { println("store: {g_fail} failed"); return 1; }
+  println("OK store");
+  return 0;
+}

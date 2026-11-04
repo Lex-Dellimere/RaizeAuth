@@ -199,3 +199,18 @@ fn main() -> int32 {
   println("OK login");
   return 0;
 }
+
+// Compile-time check: code that signs users in fits a closed function type
+// (a handler typed `with alloc, syscall, asm`).
+fn login_job(a: RaAuth*) -> int32 {
+  var uid: int64 = 0;
+  return ra_login(a, "ada", "correct horse", 0, &uid);
+}
+
+fn run_closed(job: fn(RaAuth*) -> int32 with alloc, syscall, asm, a: RaAuth*) -> int32 {
+  return job(a);
+}
+
+fn closed_check(a: RaAuth*) -> int32 {
+  return run_closed(&login_job, a);
+}

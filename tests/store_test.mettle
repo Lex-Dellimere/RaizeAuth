@@ -227,3 +227,17 @@ fn main() -> int32 {
   println("OK store");
   return 0;
 }
+
+// Compile-time check: code that calls through the stores fits a closed
+// function type (a handler typed `with alloc, syscall, asm`).
+fn prune_job(ts: RaTokenStore*) -> int32 {
+  return ra_store_tok_prune(ts, 0);
+}
+
+fn run_closed(job: fn(RaTokenStore*) -> int32 with alloc, syscall, asm, ts: RaTokenStore*) -> int32 {
+  return job(ts);
+}
+
+fn closed_check(ts: RaTokenStore*) -> int32 {
+  return run_closed(&prune_job, ts);
+}

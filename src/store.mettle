@@ -101,8 +101,8 @@ export struct RaCredential {
 /// example: var cs: RaCredStore; cs.ctx = (rawptr)&db; cs.get = &my_cred_get; cs.set_hash = &my_cred_set;
 export struct RaCredStore {
   ctx: rawptr;
-  get: fn(rawptr, string, RaCredential*) -> int32;
-  set_hash: fn(rawptr, int64, CrPwHash*) -> int32;
+  get: fn(rawptr, string, RaCredential*) -> int32 with alloc, syscall;
+  set_hash: fn(rawptr, int64, CrPwHash*) -> int32 with alloc, syscall;
 }
 
 /// Lockout counters, keyed by 32 bytes.
@@ -114,10 +114,10 @@ export struct RaCredStore {
 /// example: var ks: RaCounterStore; ks.ctx = (rawptr)&db; ks.get = &my_ctr_get; ...
 export struct RaCounterStore {
   ctx: rawptr;
-  get: fn(rawptr, uint8*, RaCounter*) -> int32;
-  put: fn(rawptr, RaCounter*) -> int32;
-  del: fn(rawptr, uint8*) -> int32;
-  prune: fn(rawptr, int64, int64) -> int32;
+  get: fn(rawptr, uint8*, RaCounter*) -> int32 with alloc, syscall;
+  put: fn(rawptr, RaCounter*) -> int32 with alloc, syscall;
+  del: fn(rawptr, uint8*) -> int32 with alloc, syscall;
+  prune: fn(rawptr, int64, int64) -> int32 with alloc, syscall;
 }
 
 /// API tokens, keyed by 32 bytes, listable by owner.
@@ -129,11 +129,11 @@ export struct RaCounterStore {
 /// example: var ts: RaTokenStore; ts.ctx = (rawptr)&db; ts.put = &my_tok_put; ...
 export struct RaTokenStore {
   ctx: rawptr;
-  put: fn(rawptr, RaToken*) -> int32;
-  get: fn(rawptr, uint8*, RaToken*) -> int32;
-  del: fn(rawptr, uint8*) -> int32;
-  list: fn(rawptr, int64, int64, RaToken*, int32) -> int32;
-  prune: fn(rawptr, int64) -> int32;
+  put: fn(rawptr, RaToken*) -> int32 with alloc, syscall;
+  get: fn(rawptr, uint8*, RaToken*) -> int32 with alloc, syscall;
+  del: fn(rawptr, uint8*) -> int32 with alloc, syscall;
+  list: fn(rawptr, int64, int64, RaToken*, int32) -> int32 with alloc, syscall;
+  prune: fn(rawptr, int64) -> int32 with alloc, syscall;
 }
 
 /// The stores an app gives ra_auth_init. creds and counters are required;

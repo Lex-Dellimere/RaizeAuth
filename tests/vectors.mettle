@@ -120,11 +120,37 @@ fn random_checks() {
   check("b64url roundtrip", n == 43 && ra_b64url_decode(s, &back[0]) == 32 && ra_ct_equal(&a[0], &back[0], 32));
 }
 
+fn password_checks() {
+  var salt: uint8[16];
+  for i in 0..16 { salt[i] = (uint8)(i * 7); }
+  var enc: RaText;
+  check("password hash", ra_password_hash_with_salt("hunter2", 1000, &salt[0], 16, &enc) == RA_OK);
+  var s: string = ra_text_str(&enc);
+  check("password prefix", str_starts_with(s, "pbkdf2-sha256$1000$") == 1);
+  check("password verify ok", ra_password_verify("hunter2", s) == RA_OK);
+  check("password verify wrong", ra_password_verify("hunter3", s) == RA_E_MISMATCH);
+  check("password verify empty", ra_password_verify("", s) == RA_E_MISMATCH);
+  check("password needs rehash", ra_password_needs_rehash(s, 0));
+  check("password no rehash", !ra_password_needs_rehash(s, 1000));
+  // PBKDF2-HMAC-SHA256("password", "saltsalt", 1000), checked with Python hashlib.
+  var ss: string = "saltsalt";
+  check("password KAT rc", ra_password_hash_with_salt("password", 1000, ss.chars, 8, &enc) == RA_OK);
+  check("password KAT", ra_text_str(&enc) == "pbkdf2-sha256$1000$c2FsdHNhbHQ$E196ZhRPzw-wA84EjzHwJO1cv_MFJdO6C_sxmUeTYqY");
+  var r1: RaText;
+  var r2: RaText;
+  check("password random salt", ra_password_hash("pw", 1000, &r1) == RA_OK && ra_password_hash("pw", 1000, &r2) == RA_OK);
+  check("password salts differ", ra_text_str(&r1) != ra_text_str(&r2));
+  check("password random verify", ra_password_verify("pw", ra_text_str(&r2)) == RA_OK);
+  check("password default iter", ra_password_hash("pw", 0, &r1) == RA_OK && str_starts_with(ra_text_str(&r1), "pbkdf2-sha256$600000$") == 1);
+  check("password default verify", ra_password_verify("pw", ra_text_str(&r1)) == RA_OK);
+}
+
 fn main() -> int32 {
   sha256_vectors();
   hmac_vectors();
   pbkdf2_vectors();
   random_checks();
+  password_checks();
   println("vectors: {g_pass} passed, {g_fail} failed");
   if (g_fail != 0) { return 1; }
   return 0;

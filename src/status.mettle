@@ -40,7 +40,7 @@ export const RA_E_PENDING: int32 = -15;
 export const RA_E_SLOW_DOWN: int32 = -16;
 /// Device flow: the user denied the request.
 export const RA_E_DENIED: int32 = -17;
-/// The crypto library failed or was not initialised (call cr_init first).
+/// The crypto library reported a failure.
 export const RA_E_CRYPTO: int32 = -18;
 
 /// Names a status in a few words, for logs and error messages.

@@ -1,12 +1,11 @@
 import "mbuild/api";
 
 // raize_auth: authentication and authorization for Mettle apps and RaizeWeb.
-// No cryptography in Mettle: every hash, random byte and comparison comes
-// from the crypto library (../cryptex, libsodium). crypto's libsodium link
-// setting reaches this package and its dependents through mbuild.
+// No cryptography in raize_auth itself: every hash, random byte and comparison comes
+// from the crypto library (../cryptex, pure Mettle). No C libraries are linked.
 fn project() {
   mb_package("raize_auth", "0.1.0");
-  mb_meta("description", "authentication and authorization: Argon2id passwords (via crypto/libsodium); store interface, lockout, API tokens and policies to follow");
+  mb_meta("description", "authentication and authorization: Argon2id passwords (via crypto); store interface; lockout, API tokens and policies to follow");
   mb_import_root("src");
   // Test programs: tests/<name>_test.mettle with fn main, built with the
   // package's link settings and run by `mbuild test` (`-r` for release).

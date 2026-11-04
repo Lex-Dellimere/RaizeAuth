@@ -1,6 +1,5 @@
 // raize_auth/auth: the whole library in one import. No exports of its own; it
-// re-exports every module below, and crypto's cr_* functions (call cr_init()
-// once on the main thread before anything else):
+// re-exports every module below, and crypto's cr_* functions (any thread):
 //   import "raize_auth/auth";
 import "crypto/crypto";
 import "status";

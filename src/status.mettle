@@ -40,6 +40,8 @@ export const RA_E_PENDING: int32 = -15;
 export const RA_E_SLOW_DOWN: int32 = -16;
 /// Device flow: the user denied the request.
 export const RA_E_DENIED: int32 = -17;
+/// The crypto library failed or was not initialised (call cr_init first).
+export const RA_E_CRYPTO: int32 = -18;
 
 /// Names a status in a few words, for logs and error messages.
 ///
@@ -68,6 +70,7 @@ export fn ra_status_text(code: int32) -> string {
   if (code == RA_E_PENDING) { return "authorization pending"; }
   if (code == RA_E_SLOW_DOWN) { return "slow down"; }
   if (code == RA_E_DENIED) { return "access denied"; }
+  if (code == RA_E_CRYPTO) { return "crypto failure"; }
   return "unknown status";
 }
 

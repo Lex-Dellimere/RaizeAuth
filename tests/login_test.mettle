@@ -19,7 +19,7 @@ fn check(name: string, ok: bool) {
 }
 
 // A fresh handle over `st` with ada's password set to "correct horse".
-fn fresh(a: RaAuth*, st: RaStore*, cfg: RaConfig*) -> bool {
+fn fresh(a: RaAuth*, st: RaStores*, cfg: RaConfig*) -> bool {
   if (ra_auth_init(a, cfg, st) != RA_OK) { return false; }
   return ra_set_password(a, 1, "correct horse") == RA_OK;
 }
@@ -29,8 +29,11 @@ fn main() -> int32 {
 
   var db: TstDb;
   tst_init(&db);
-  var st: RaStore;
-  tst_bind(&st, &db);
+  var st: RaStores;
+  var cs: RaCredStore;
+  var ks: RaCounterStore;
+  var ts: RaTokenStore;
+  tst_bind(&st, &cs, &ks, &ts, &db);
 
   // ---- 1. config and init ----
   var cfg: RaConfig;
@@ -45,10 +48,27 @@ fn main() -> int32 {
   var a0: RaAuth;
   check("init null auth", ra_auth_init((RaAuth*)0, &cfg, &st) == RA_E_USAGE);
   check("init null cfg", ra_auth_init(&a0, (RaConfig*)0, &st) == RA_E_USAGE);
-  check("init null store", ra_auth_init(&a0, &cfg, (RaStore*)0) == RA_E_USAGE);
-  var empty: RaStore;
-  memset((rawptr)&empty, 0, (int64)sizeof(RaStore));
-  check("init incomplete store", ra_auth_init(&a0, &cfg, &empty) == RA_E_USAGE);
+  check("init null store", ra_auth_init(&a0, &cfg, (RaStores*)0) == RA_E_USAGE);
+  var empty: RaStores;
+  memset((rawptr)&empty, 0, (int64)sizeof(RaStores));
+  check("init empty stores", ra_auth_init(&a0, &cfg, &empty) == RA_E_USAGE);
+  var s2: RaStores;
+  s2 = st;
+  s2.tokens = (RaTokenStore*)0;
+  check("init tokens null", ra_auth_init(&a0, &cfg, &s2) == RA_OK);
+  s2 = st;
+  s2.creds = (RaCredStore*)0;
+  check("init creds null", ra_auth_init(&a0, &cfg, &s2) == RA_E_USAGE);
+  var zk: RaCounterStore;
+  memset((rawptr)&zk, 0, (int64)sizeof(RaCounterStore));
+  s2 = st;
+  s2.counters = &zk;
+  check("init counters incomplete", ra_auth_init(&a0, &cfg, &s2) == RA_E_USAGE);
+  var zt: RaTokenStore;
+  memset((rawptr)&zt, 0, (int64)sizeof(RaTokenStore));
+  s2 = st;
+  s2.tokens = &zt;
+  check("init tokens incomplete", ra_auth_init(&a0, &cfg, &s2) == RA_E_USAGE);
   var bad: RaConfig;
   bad = cfg;
   bad.lock_max = 0;
@@ -70,7 +90,7 @@ fn main() -> int32 {
 
   // ---- 3. login ----
   var cred: RaCredential;
-  check("cred ada", ra_store_cred_get(&st, "ada", &cred) == RA_OK);
+  check("cred ada", ra_store_cred_get(&cs, "ada", &cred) == RA_OK);
   var ada: int64 = cred.owner;
   var owner: int64 = 77;
   var now: int64 = 1000000;
@@ -107,8 +127,11 @@ fn main() -> int32 {
   lcfg.lock_for = 50;
   var db4: TstDb;
   tst_init(&db4);
-  var st4: RaStore;
-  tst_bind(&st4, &db4);
+  var st4: RaStores;
+  var cs4: RaCredStore;
+  var ks4: RaCounterStore;
+  var ts4: RaTokenStore;
+  tst_bind(&st4, &cs4, &ks4, &ts4, &db4);
   var l: RaAuth;
   check("lock fresh", fresh(&l, &st4, &lcfg));
   check("lock wrong 1", ra_login(&l, "ada", "wrong one", 1000, &owner) == RA_E_DENIED);
@@ -148,14 +171,17 @@ fn main() -> int32 {
   // ---- 7. rehash (MODERATE is slow: once) ----
   var db7: TstDb;
   tst_init(&db7);
-  var st7: RaStore;
-  tst_bind(&st7, &db7);
+  var st7: RaStores;
+  var cs7: RaCredStore;
+  var ks7: RaCounterStore;
+  var ts7: RaTokenStore;
+  tst_bind(&st7, &cs7, &ks7, &ts7, &db7);
   var icfg: RaConfig;
   ra_config_defaults(&icfg);
   var ia: RaAuth;
   check("rehash fresh", fresh(&ia, &st7, &icfg));
   var c0: RaCredential;
-  check("rehash cred before", ra_store_cred_get(&st7, "ada", &c0) == RA_OK);
+  check("rehash cred before", ra_store_cred_get(&cs7, "ada", &c0) == RA_OK);
   check("rehash needed before", ra_password_needs_rehash(&c0.hash, CR_PW_MODERATE));
   var mcfg: RaConfig;
   ra_config_defaults(&mcfg);
@@ -164,7 +190,7 @@ fn main() -> int32 {
   check("rehash init moderate", ra_auth_init(&ma, &mcfg, &st7) == RA_OK);
   check("rehash login", ra_login(&ma, "ada", "correct horse", 9000, &owner) == RA_OK);
   var c1: RaCredential;
-  check("rehash cred after", ra_store_cred_get(&st7, "ada", &c1) == RA_OK);
+  check("rehash cred after", ra_store_cred_get(&cs7, "ada", &c1) == RA_OK);
   check("rehash not needed after", !ra_password_needs_rehash(&c1.hash, CR_PW_MODERATE));
   check("rehash still verifies", ra_password_verify(&c1.hash, "correct horse"));
   check("rehash owner kept", c1.owner == 1);

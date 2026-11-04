@@ -18,27 +18,24 @@ export const RA_E_CONFLICT: int32 = -4;
 export const RA_E_FULL: int32 = -5;
 /// An allocation failed.
 export const RA_E_NOMEM: int32 = -6;
-/// The operation is not supported (platform without getrandom, store without it).
+/// The operation is not supported here.
 export const RA_E_UNSUPPORTED: int32 = -7;
-/// The store failed for its own reasons (a MeoSQL error, a closed store).
+/// The store's backend failed (a database error, a closed connection).
 export const RA_E_STORE: int32 = -8;
-/// The OS random source failed.
+/// An I/O operation failed.
 export const RA_E_IO: int32 = -9;
-/// The session, token or device code has expired.
+/// A token or code has expired.
 export const RA_E_EXPIRED: int32 = -10;
-/// The session or token was revoked.
+/// A token was revoked.
 export const RA_E_REVOKED: int32 = -11;
-/// Wrong password, wrong CSRF token, or a token of the wrong kind.
+/// A value did not match what was expected.
 export const RA_E_MISMATCH: int32 = -12;
-/// The lockout key is locked after too many failures.
+/// Locked after too many failed attempts.
 export const RA_E_LOCKED: int32 = -13;
 /// The API token's scope does not cover what was asked.
 export const RA_E_SCOPE: int32 = -14;
-/// Device flow: the user has not approved yet; poll again after the interval.
-export const RA_E_PENDING: int32 = -15;
-/// Device flow: polled faster than the interval; the interval grew by 5 s.
-export const RA_E_SLOW_DOWN: int32 = -16;
-/// Device flow: the user denied the request.
+/// Access denied: wrong password, unknown login, disabled account, or a
+/// rule refused the action. (-15 and -16 are reserved.)
 export const RA_E_DENIED: int32 = -17;
 /// The crypto library reported a failure.
 export const RA_E_CRYPTO: int32 = -18;
@@ -61,14 +58,12 @@ export fn ra_status_text(code: int32) -> string {
   if (code == RA_E_NOMEM) { return "out of memory"; }
   if (code == RA_E_UNSUPPORTED) { return "unsupported"; }
   if (code == RA_E_STORE) { return "store error"; }
-  if (code == RA_E_IO) { return "random source failed"; }
+  if (code == RA_E_IO) { return "i/o failure"; }
   if (code == RA_E_EXPIRED) { return "expired"; }
   if (code == RA_E_REVOKED) { return "revoked"; }
   if (code == RA_E_MISMATCH) { return "mismatch"; }
   if (code == RA_E_LOCKED) { return "locked"; }
   if (code == RA_E_SCOPE) { return "scope not allowed"; }
-  if (code == RA_E_PENDING) { return "authorization pending"; }
-  if (code == RA_E_SLOW_DOWN) { return "slow down"; }
   if (code == RA_E_DENIED) { return "access denied"; }
   if (code == RA_E_CRYPTO) { return "crypto failure"; }
   return "unknown status";

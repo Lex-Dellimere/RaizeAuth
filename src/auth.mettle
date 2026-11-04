@@ -5,4 +5,5 @@ import "crypto/crypto";
 import "status";
 import "password";
 import "store";
+import "config";
 import "login";

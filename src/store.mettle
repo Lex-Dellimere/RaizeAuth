@@ -1,9 +1,15 @@
-// raize_auth/store: the storage contract (RaStore) a backend implements for
-// API tokens, lockout counters and password credentials. raize_auth has no
-// storage of its own; flux_orm (or MeoDB, or alph later) supplies a backend.
-// Browser sessions are not here: they use the `session` library's SesStore.
+// raize_auth/store: the storage contracts a backend implements. raize_auth
+// has no storage of its own; the app supplies a backend over its database.
+// Browser sessions are not here: they use `session`'s SesStore.
 //
-// CONTRACT for a backend:
+// One small store per feature, so a backend implements only what the app
+// uses, and a new feature adds a new store instead of changing old ones:
+//   RaCredStore     passwords: read a user's credential, replace its hash
+//   RaCounterStore  lockout counters
+//   RaTokenStore    API tokens (optional; only the token functions need it)
+// RaStores bundles them for ra_auth_init. An unused feature's pointer is null.
+//
+// CONTRACT for every store:
 //
 // * Records are plain values with fixed-size fields (no pointers). `put`
 //   copies *r in; `get` copies into *out. Neither side keeps a pointer it
@@ -18,14 +24,15 @@
 // * Status codes: RA_OK, RA_E_NOT_FOUND (get/del/update of a missing row),
 //   RA_E_NOMEM, RA_E_FULL, RA_E_STORE (any backend failure). Nothing else.
 //   A backend never prints or exits.
-// * `tok_list` returns one owner's tokens in a stable order (creation order
-//   is fine), skipping `skip`, at most `cap`; the result is the count written
-//   (0 = done) or an error.
-// * `prune` deletes revoked tokens, tokens with 0 < expires <= now, and
-//   counters with locked_until <= now whose window_start < counter_before.
-//   It returns how many rows it removed, or an error.
-// * Threads: raize_auth makes one store call at a time and never locks. A
-//   backend shared between threads locks inside each function.
+// * RaTokenStore.list returns one owner's tokens in a stable order (creation
+//   order is fine), skipping `skip`, at most `cap`; the result is the count
+//   written (0 = done) or an error.
+// * RaTokenStore.prune deletes revoked tokens and tokens with
+//   0 < expires <= now. RaCounterStore.prune deletes counters with
+//   locked_until <= now whose window_start < before. Both return how many
+//   rows they removed, or an error.
+// * Threads: raize_auth makes one store call at a time per request and never
+//   locks. A backend shared between threads locks inside each function.
 
 import "std/mem";
 import "std/conv";
@@ -78,50 +85,109 @@ export struct RaCounter {
 /// returns: -
 /// owns:    plain value; hash is an Argon2id string (ra_password_text form)
 /// thread:  plain value
-/// example: var c: RaCredential; rc = ra_store_cred_get(st, login, &c);
+/// example: var c: RaCredential; rc = ra_store_cred_get(cs, login, &c);
 export struct RaCredential {
   owner: int64;
   disabled: int32;
   hash: CrPwHash;
 }
 
-/// The store vtable. Set every function; `ctx` is passed back first.
+/// Password credentials: read by login, replace the hash by owner.
 ///
-/// in:      - (fill each field before use; check with ra_store_complete)
+/// in:      - (set both functions; check with ra_store_cred_complete)
 /// returns: -
-/// owns:    the app owns ctx and the backend; raize_auth only calls through it
+/// owns:    the app owns ctx and the backend
 /// thread:  see the contract at the top of this file
-/// example:
-///   var st: RaStore;
-///   st.ctx = (rawptr)&db; st.tok_put = &my_tok_put; ...
-export struct RaStore {
+/// example: var cs: RaCredStore; cs.ctx = (rawptr)&db; cs.get = &my_cred_get; cs.set_hash = &my_cred_set;
+export struct RaCredStore {
   ctx: rawptr;
-  tok_put: fn(rawptr, RaToken*) -> int32;
-  tok_get: fn(rawptr, uint8*, RaToken*) -> int32;
-  tok_del: fn(rawptr, uint8*) -> int32;
-  tok_list: fn(rawptr, int64, int64, RaToken*, int32) -> int32;
-  ctr_get: fn(rawptr, uint8*, RaCounter*) -> int32;
-  ctr_put: fn(rawptr, RaCounter*) -> int32;
-  ctr_del: fn(rawptr, uint8*) -> int32;
-  cred_get: fn(rawptr, string, RaCredential*) -> int32;
-  cred_set_hash: fn(rawptr, int64, CrPwHash*) -> int32;
+  get: fn(rawptr, string, RaCredential*) -> int32;
+  set_hash: fn(rawptr, int64, CrPwHash*) -> int32;
+}
+
+/// Lockout counters, keyed by 32 bytes.
+///
+/// in:      - (set all four functions; check with ra_store_ctr_complete)
+/// returns: -
+/// owns:    the app owns ctx and the backend
+/// thread:  see the contract at the top of this file
+/// example: var ks: RaCounterStore; ks.ctx = (rawptr)&db; ks.get = &my_ctr_get; ...
+export struct RaCounterStore {
+  ctx: rawptr;
+  get: fn(rawptr, uint8*, RaCounter*) -> int32;
+  put: fn(rawptr, RaCounter*) -> int32;
+  del: fn(rawptr, uint8*) -> int32;
   prune: fn(rawptr, int64, int64) -> int32;
 }
 
-/// Says whether a store has every function set.
+/// API tokens, keyed by 32 bytes, listable by owner.
+///
+/// in:      - (set all five functions; check with ra_store_tok_complete)
+/// returns: -
+/// owns:    the app owns ctx and the backend
+/// thread:  see the contract at the top of this file
+/// example: var ts: RaTokenStore; ts.ctx = (rawptr)&db; ts.put = &my_tok_put; ...
+export struct RaTokenStore {
+  ctx: rawptr;
+  put: fn(rawptr, RaToken*) -> int32;
+  get: fn(rawptr, uint8*, RaToken*) -> int32;
+  del: fn(rawptr, uint8*) -> int32;
+  list: fn(rawptr, int64, int64, RaToken*, int32) -> int32;
+  prune: fn(rawptr, int64) -> int32;
+}
+
+/// The stores an app gives ra_auth_init. creds and counters are required;
+/// tokens may be null when the app has no API tokens.
+///
+/// in:      - (zeroed when declared; set the pointers you use)
+/// returns: -
+/// owns:    borrows each store; the app keeps them alive while RaAuth is used
+/// thread:  plain value
+/// example: var s: RaStores; s.creds = &cs; s.counters = &ks; s.tokens = &ts;
+export struct RaStores {
+  creds: RaCredStore*;
+  counters: RaCounterStore*;
+  tokens: RaTokenStore*;
+}
+
+/// Says whether a credential store has both functions set.
 ///
 /// in:      s        a store, or null
-/// returns: true when s is non-null and all ten functions are set
+/// returns: true when s is non-null and get and set_hash are set
 /// owns:    nothing
 /// thread:  any (pure)
 /// example:
-///   if (!ra_store_complete(&st)) { return RA_E_USAGE; }
-export fn ra_store_complete(s: RaStore*) -> bool {
+///   if (!ra_store_cred_complete(&cs)) { return RA_E_USAGE; }
+export fn ra_store_cred_complete(s: RaCredStore*) -> bool {
   if (s == 0) { return false; }
-  if (s->tok_put == 0 || s->tok_get == 0 || s->tok_del == 0 || s->tok_list == 0) { return false; }
-  if (s->ctr_get == 0 || s->ctr_put == 0 || s->ctr_del == 0) { return false; }
-  if (s->cred_get == 0 || s->cred_set_hash == 0 || s->prune == 0) { return false; }
-  return true;
+  return s->get != 0 && s->set_hash != 0;
+}
+
+/// Says whether a counter store has all four functions set.
+///
+/// in:      s        a store, or null
+/// returns: true when s is non-null and get, put, del and prune are set
+/// owns:    nothing
+/// thread:  any (pure)
+/// example:
+///   if (!ra_store_ctr_complete(&ks)) { return RA_E_USAGE; }
+export fn ra_store_ctr_complete(s: RaCounterStore*) -> bool {
+  if (s == 0) { return false; }
+  return s->get != 0 && s->put != 0 && s->del != 0 && s->prune != 0;
+}
+
+/// Says whether a token store has all five functions set.
+///
+/// in:      s        a store, or null
+/// returns: true when s is non-null and put, get, del, list and prune are set
+/// owns:    nothing
+/// thread:  any (pure)
+/// example:
+///   if (!ra_store_tok_complete(&ts)) { return RA_E_USAGE; }
+export fn ra_store_tok_complete(s: RaTokenStore*) -> bool {
+  if (s == 0) { return false; }
+  if (s->put == 0 || s->get == 0 || s->del == 0) { return false; }
+  return s->list != 0 && s->prune != 0;
 }
 
 /// Views a token's scope as a string.
@@ -180,147 +246,164 @@ export fn ra_token_set_label(t: RaToken*, label: string) -> int32 {
   return RA_OK;
 }
 
-/// Stores (inserts or replaces by key) a token.
+/// Reads a user's credential by login.
 ///
-/// in:      s        a complete store; t the token
-/// returns: RA_OK, RA_E_USAGE (null or incomplete store, null t), or the backend's error
-/// owns:    the backend copies *t
+/// in:      s        a complete credential store; login the normalised login;
+///                   out the credential to fill
+/// returns: RA_OK, RA_E_NOT_FOUND (no such user), RA_E_USAGE, or the backend's error
+/// owns:    the backend copies into *out
 /// thread:  as the backend
 /// example:
-///   rc = ra_store_tok_put(st, &t);
-export fn ra_store_tok_put(s: RaStore*, t: RaToken*) -> int32 {
-  if (!ra_store_complete(s) || t == 0) { return RA_E_USAGE; }
-  return s->tok_put(s->ctx, t);
+///   var c: RaCredential;
+///   rc = ra_store_cred_get(cs, "ada@example.com", &c);
+export fn ra_store_cred_get(s: RaCredStore*, login: string, out: RaCredential*) -> int32 {
+  if (!ra_store_cred_complete(s) || out == 0 || login.length == 0) { return RA_E_USAGE; }
+  return s->get(s->ctx, login, out);
 }
 
-/// Fetches a token by key.
+/// Replaces a user's password hash (after sign-up, a password change, or a
+/// rehash at a higher cost).
 ///
-/// in:      s        a complete store; key 32 bytes; out the token to fill
+/// in:      s        a complete credential store; owner the user id; h the new hash
+/// returns: RA_OK, RA_E_NOT_FOUND (no such user), RA_E_USAGE, or the backend's error
+/// owns:    the backend copies *h
+/// thread:  as the backend
+/// example:
+///   rc = ra_store_cred_set_hash(cs, c.owner, &h);
+export fn ra_store_cred_set_hash(s: RaCredStore*, owner: int64, h: CrPwHash*) -> int32 {
+  if (!ra_store_cred_complete(s) || h == 0) { return RA_E_USAGE; }
+  return s->set_hash(s->ctx, owner, h);
+}
+
+/// Fetches a lockout counter by key.
+///
+/// in:      s        a complete counter store; key 32 bytes; out the counter to fill
 /// returns: RA_OK, RA_E_NOT_FOUND, RA_E_USAGE, or the backend's error
 /// owns:    the backend copies into *out
 /// thread:  as the backend
 /// example:
-///   if (ra_store_tok_get(st, &h.b[0], &t) != RA_OK) { return RA_E_DENIED; }
-export fn ra_store_tok_get(s: RaStore*, key: uint8*, out: RaToken*) -> int32 {
-  if (!ra_store_complete(s) || key == 0 || out == 0) { return RA_E_USAGE; }
-  return s->tok_get(s->ctx, key, out);
+///   rc = ra_store_ctr_get(ks, &k.b[0], &c);
+export fn ra_store_ctr_get(s: RaCounterStore*, key: uint8*, out: RaCounter*) -> int32 {
+  if (!ra_store_ctr_complete(s) || key == 0 || out == 0) { return RA_E_USAGE; }
+  return s->get(s->ctx, key, out);
 }
 
-/// Deletes a token by key.
+/// Stores (inserts or replaces by key) a lockout counter.
 ///
-/// in:      s        a complete store; key 32 bytes
+/// in:      s        a complete counter store; c the counter
+/// returns: RA_OK, RA_E_USAGE, or the backend's error
+/// owns:    the backend copies *c
+/// thread:  as the backend
+/// example:
+///   rc = ra_store_ctr_put(ks, &c);
+export fn ra_store_ctr_put(s: RaCounterStore*, c: RaCounter*) -> int32 {
+  if (!ra_store_ctr_complete(s) || c == 0) { return RA_E_USAGE; }
+  return s->put(s->ctx, c);
+}
+
+/// Deletes a lockout counter by key.
+///
+/// in:      s        a complete counter store; key 32 bytes
 /// returns: RA_OK, RA_E_NOT_FOUND, RA_E_USAGE, or the backend's error
 /// owns:    nothing
 /// thread:  as the backend
 /// example:
-///   ra_store_tok_del(st, &t.key[0]);
-export fn ra_store_tok_del(s: RaStore*, key: uint8*) -> int32 {
-  if (!ra_store_complete(s) || key == 0) { return RA_E_USAGE; }
-  return s->tok_del(s->ctx, key);
+///   ra_store_ctr_del(ks, &k.b[0]);
+export fn ra_store_ctr_del(s: RaCounterStore*, key: uint8*) -> int32 {
+  if (!ra_store_ctr_complete(s) || key == 0) { return RA_E_USAGE; }
+  return s->del(s->ctx, key);
+}
+
+/// Removes unlocked counters whose window began before `before`.
+///
+/// in:      s        a complete counter store; now the current time (unix seconds)
+///          before   drop unlocked counters whose window began before this
+/// returns: the number of rows removed, or an error (< 0)
+/// owns:    nothing
+/// thread:  as the backend
+/// example:
+///   ra_store_ctr_prune(ks, now, now - 86400);
+export fn ra_store_ctr_prune(s: RaCounterStore*, now: int64, before: int64) -> int32 {
+  if (!ra_store_ctr_complete(s)) { return RA_E_USAGE; }
+  return s->prune(s->ctx, now, before);
+}
+
+/// Stores (inserts or replaces by key) a token.
+///
+/// in:      s        a complete token store; t the token
+/// returns: RA_OK, RA_E_USAGE (null or incomplete store, null t), or the backend's error
+/// owns:    the backend copies *t
+/// thread:  as the backend
+/// example:
+///   rc = ra_store_tok_put(ts, &t);
+export fn ra_store_tok_put(s: RaTokenStore*, t: RaToken*) -> int32 {
+  if (!ra_store_tok_complete(s) || t == 0) { return RA_E_USAGE; }
+  return s->put(s->ctx, t);
+}
+
+/// Fetches a token by key.
+///
+/// in:      s        a complete token store; key 32 bytes; out the token to fill
+/// returns: RA_OK, RA_E_NOT_FOUND, RA_E_USAGE, or the backend's error
+/// owns:    the backend copies into *out
+/// thread:  as the backend
+/// example:
+///   if (ra_store_tok_get(ts, &h.b[0], &t) != RA_OK) { return RA_E_DENIED; }
+export fn ra_store_tok_get(s: RaTokenStore*, key: uint8*, out: RaToken*) -> int32 {
+  if (!ra_store_tok_complete(s) || key == 0 || out == 0) { return RA_E_USAGE; }
+  return s->get(s->ctx, key, out);
+}
+
+/// Deletes a token by key.
+///
+/// in:      s        a complete token store; key 32 bytes
+/// returns: RA_OK, RA_E_NOT_FOUND, RA_E_USAGE, or the backend's error
+/// owns:    nothing
+/// thread:  as the backend
+/// example:
+///   ra_store_tok_del(ts, &t.key[0]);
+export fn ra_store_tok_del(s: RaTokenStore*, key: uint8*) -> int32 {
+  if (!ra_store_tok_complete(s) || key == 0) { return RA_E_USAGE; }
+  return s->del(s->ctx, key);
 }
 
 /// Lists one owner's tokens, a page at a time.
 ///
-/// in:      s        a complete store; owner a user id; skip >= 0
+/// in:      s        a complete token store; owner a user id; skip >= 0
 ///          out, cap the page buffer (cap >= 1)
 /// returns: the count written (0 = no more), or an error (< 0)
 /// owns:    the backend copies into out[0..count]
 /// thread:  as the backend
 /// example:
 ///   var page: RaToken[16];
-///   var n: int32 = ra_store_tok_list(st, uid, 0, &page[0], 16);
-export fn ra_store_tok_list(s: RaStore*, owner: int64, skip: int64, out: RaToken*, cap: int32) -> int32 {
-  if (!ra_store_complete(s) || out == 0 || cap < 1 || skip < 0) { return RA_E_USAGE; }
-  return s->tok_list(s->ctx, owner, skip, out, cap);
+///   var n: int32 = ra_store_tok_list(ts, uid, 0, &page[0], 16);
+export fn ra_store_tok_list(s: RaTokenStore*, owner: int64, skip: int64, out: RaToken*, cap: int32) -> int32 {
+  if (!ra_store_tok_complete(s) || out == 0 || cap < 1 || skip < 0) { return RA_E_USAGE; }
+  return s->list(s->ctx, owner, skip, out, cap);
 }
 
-/// Fetches a lockout counter by key.
+/// Removes revoked and expired tokens.
 ///
-/// in:      s        a complete store; key 32 bytes; out the counter to fill
-/// returns: RA_OK, RA_E_NOT_FOUND, RA_E_USAGE, or the backend's error
-/// owns:    the backend copies into *out
-/// thread:  as the backend
-/// example:
-///   rc = ra_store_ctr_get(st, &k.b[0], &c);
-export fn ra_store_ctr_get(s: RaStore*, key: uint8*, out: RaCounter*) -> int32 {
-  if (!ra_store_complete(s) || key == 0 || out == 0) { return RA_E_USAGE; }
-  return s->ctr_get(s->ctx, key, out);
-}
-
-/// Stores (inserts or replaces by key) a lockout counter.
-///
-/// in:      s        a complete store; c the counter
-/// returns: RA_OK, RA_E_USAGE, or the backend's error
-/// owns:    the backend copies *c
-/// thread:  as the backend
-/// example:
-///   rc = ra_store_ctr_put(st, &c);
-export fn ra_store_ctr_put(s: RaStore*, c: RaCounter*) -> int32 {
-  if (!ra_store_complete(s) || c == 0) { return RA_E_USAGE; }
-  return s->ctr_put(s->ctx, c);
-}
-
-/// Deletes a lockout counter by key.
-///
-/// in:      s        a complete store; key 32 bytes
-/// returns: RA_OK, RA_E_NOT_FOUND, RA_E_USAGE, or the backend's error
-/// owns:    nothing
-/// thread:  as the backend
-/// example:
-///   ra_store_ctr_del(st, &k.b[0]);
-export fn ra_store_ctr_del(s: RaStore*, key: uint8*) -> int32 {
-  if (!ra_store_complete(s) || key == 0) { return RA_E_USAGE; }
-  return s->ctr_del(s->ctx, key);
-}
-
-/// Reads a user's credential by login.
-///
-/// in:      s        a complete store; login the normalised login; out to fill
-/// returns: RA_OK, RA_E_NOT_FOUND (no such user), RA_E_USAGE, or the backend's error
-/// owns:    the backend copies into *out
-/// thread:  as the backend
-/// example:
-///   var c: RaCredential;
-///   rc = ra_store_cred_get(st, "ada@example.com", &c);
-export fn ra_store_cred_get(s: RaStore*, login: string, out: RaCredential*) -> int32 {
-  if (!ra_store_complete(s) || out == 0 || login.length == 0) { return RA_E_USAGE; }
-  return s->cred_get(s->ctx, login, out);
-}
-
-/// Replaces a user's password hash (after sign-up, a password change, or a
-/// rehash at a higher cost).
-///
-/// in:      s        a complete store; owner the user id; h the new hash
-/// returns: RA_OK, RA_E_NOT_FOUND (no such user), RA_E_USAGE, or the backend's error
-/// owns:    the backend copies *h
-/// thread:  as the backend
-/// example:
-///   rc = ra_store_cred_set_hash(st, c.owner, &h);
-export fn ra_store_cred_set_hash(s: RaStore*, owner: int64, h: CrPwHash*) -> int32 {
-  if (!ra_store_complete(s) || h == 0) { return RA_E_USAGE; }
-  return s->cred_set_hash(s->ctx, owner, h);
-}
-
-/// Removes expired and revoked tokens and stale unlocked counters.
-///
-/// in:      s        a complete store; now the current time (unix seconds)
-///          counter_before  drop unlocked counters whose window began before this
+/// in:      s        a complete token store; now the current time (unix seconds)
 /// returns: the number of rows removed, or an error (< 0)
 /// owns:    nothing
 /// thread:  as the backend
 /// example:
-///   ra_store_prune(st, now, now - 86400);
-export fn ra_store_prune(s: RaStore*, now: int64, counter_before: int64) -> int32 {
-  if (!ra_store_complete(s)) { return RA_E_USAGE; }
-  return s->prune(s->ctx, now, counter_before);
+///   ra_store_tok_prune(ts, now);
+export fn ra_store_tok_prune(s: RaTokenStore*, now: int64) -> int32 {
+  if (!ra_store_tok_complete(s)) { return RA_E_USAGE; }
+  return s->prune(s->ctx, now);
 }
 
 @test fn t_ra_store_incomplete() -> int32 {
-  var st: RaStore;
-  if (ra_store_complete(&st)) { return 1; }
-  if (ra_store_complete((RaStore*)0)) { return 2; }
+  var cs: RaCredStore;
+  var ks: RaCounterStore;
+  var ts: RaTokenStore;
+  if (ra_store_cred_complete(&cs) || ra_store_ctr_complete(&ks) || ra_store_tok_complete(&ts)) { return 1; }
+  if (ra_store_cred_complete((RaCredStore*)0)) { return 2; }
   var t: RaToken;
-  if (ra_store_tok_put(&st, &t) != RA_E_USAGE) { return 3; }
+  if (ra_store_tok_put(&ts, &t) != RA_E_USAGE) { return 3; }
+  if (ra_store_tok_prune((RaTokenStore*)0, 0) != RA_E_USAGE) { return 4; }
   return 0;
 }
 

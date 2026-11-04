@@ -1,5 +1,5 @@
-// tests/teststore: TEST-ONLY in-memory RaStore shared by the test programs
-// (store_test, login_test). Not part of the library. It has no fn main, so
+// tests/teststore: TEST-ONLY in-memory stores (RaCredStore, RaCounterStore,
+// RaTokenStore) shared by the test programs (store_test, login_test). Not part of the library. It has no fn main, so
 // mbuild does not treat it as a test program. Credential slots are fixed:
 // "ada" (owner 1, enabled) and "bob" (owner 2, disabled), both without a hash
 // until ra_store_cred_set_hash / ra_set_password gives them one.
@@ -152,7 +152,7 @@ fn tst_cred_set_hash(ctx: rawptr, owner: int64, h: CrPwHash*) -> int32 {
   return RA_E_NOT_FOUND;
 }
 
-fn tst_prune(ctx: rawptr, now: int64, counter_before: int64) -> int32 {
+fn tst_tok_prune(ctx: rawptr, now: int64) -> int32 {
   var db: TstDb* = (TstDb*)ctx;
   var removed: int32 = 0;
   var i: int32 = 0;
@@ -167,11 +167,17 @@ fn tst_prune(ctx: rawptr, now: int64, counter_before: int64) -> int32 {
     }
     i = i + 1;
   }
-  i = 0;
+  return removed;
+}
+
+fn tst_ctr_prune(ctx: rawptr, now: int64, before: int64) -> int32 {
+  var db: TstDb* = (TstDb*)ctx;
+  var removed: int32 = 0;
+  var i: int32 = 0;
   while (i < 8) {
     if (db->ctr_used[i] != 0) {
       var c: RaCounter* = &db->counters[i];
-      if (c->locked_until <= now && c->window_start < counter_before) {
+      if (c->locked_until <= now && c->window_start < before) {
         db->ctr_used[i] = 0;
         memset((rawptr)c, 0, (int64)sizeof(RaCounter));
         removed = removed + 1;
@@ -182,16 +188,23 @@ fn tst_prune(ctx: rawptr, now: int64, counter_before: int64) -> int32 {
   return removed;
 }
 
-export fn tst_bind(st: RaStore*, db: TstDb*) {
-  st->ctx = (rawptr)db;
-  st->tok_put = &tst_tok_put;
-  st->tok_get = &tst_tok_get;
-  st->tok_del = &tst_tok_del;
-  st->tok_list = &tst_tok_list;
-  st->ctr_get = &tst_ctr_get;
-  st->ctr_put = &tst_ctr_put;
-  st->ctr_del = &tst_ctr_del;
-  st->cred_get = &tst_cred_get;
-  st->cred_set_hash = &tst_cred_set_hash;
-  st->prune = &tst_prune;
+// Fills all three stores over db and points stores at them.
+export fn tst_bind(stores: RaStores*, cs: RaCredStore*, ks: RaCounterStore*, ts: RaTokenStore*, db: TstDb*) {
+  cs->ctx = (rawptr)db;
+  cs->get = &tst_cred_get;
+  cs->set_hash = &tst_cred_set_hash;
+  ks->ctx = (rawptr)db;
+  ks->get = &tst_ctr_get;
+  ks->put = &tst_ctr_put;
+  ks->del = &tst_ctr_del;
+  ks->prune = &tst_ctr_prune;
+  ts->ctx = (rawptr)db;
+  ts->put = &tst_tok_put;
+  ts->get = &tst_tok_get;
+  ts->del = &tst_tok_del;
+  ts->list = &tst_tok_list;
+  ts->prune = &tst_tok_prune;
+  stores->creds = cs;
+  stores->counters = ks;
+  stores->tokens = ts;
 }

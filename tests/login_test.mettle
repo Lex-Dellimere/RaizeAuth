@@ -1,0 +1,175 @@
+// tests/login_test: src/login.mettle (ra_auth_init, ra_set_password, ra_login
+// with lockout and rehash, ra_lockout_clear) over the shared in-memory backend
+// in teststore.mettle. Times are plain int64 values; there is no clock. A test
+// program (Argon2id is too slow for @test); `mbuild test` builds and runs it,
+// `-r` in release.
+
+import "std/io";
+import "std/mem";
+import "raize_auth/auth";
+import "teststore";
+
+var g_fail: int32 = 0;
+
+fn check(name: string, ok: bool) {
+  if (!ok) {
+    g_fail = g_fail + 1;
+    println("FAIL " + name);
+  }
+}
+
+// A fresh handle over `st` with ada's password set to "correct horse".
+fn fresh(a: RaAuth*, st: RaStore*, cfg: RaConfig*) -> bool {
+  if (ra_auth_init(a, cfg, st) != RA_OK) { return false; }
+  return ra_set_password(a, 1, "correct horse") == RA_OK;
+}
+
+fn main() -> int32 {
+  if (cr_init() != CR_OK) { println("FAIL cr_init"); return 1; }
+
+  var db: TstDb;
+  tst_init(&db);
+  var st: RaStore;
+  tst_bind(&st, &db);
+
+  // ---- 1. config and init ----
+  var cfg: RaConfig;
+  ra_config_defaults(&cfg);
+  check("defaults preset", cfg.pw_preset == CR_PW_INTERACTIVE);
+  check("defaults lock_max", cfg.lock_max == 5);
+  check("defaults lock_window", cfg.lock_window == 900);
+  check("defaults lock_for", cfg.lock_for == 900);
+
+  var a: RaAuth;
+  check("init ok", ra_auth_init(&a, &cfg, &st) == RA_OK);
+  var a0: RaAuth;
+  check("init null auth", ra_auth_init((RaAuth*)0, &cfg, &st) == RA_E_USAGE);
+  check("init null cfg", ra_auth_init(&a0, (RaConfig*)0, &st) == RA_E_USAGE);
+  check("init null store", ra_auth_init(&a0, &cfg, (RaStore*)0) == RA_E_USAGE);
+  var empty: RaStore;
+  memset((rawptr)&empty, 0, (int64)sizeof(RaStore));
+  check("init incomplete store", ra_auth_init(&a0, &cfg, &empty) == RA_E_USAGE);
+  var bad: RaConfig;
+  bad = cfg;
+  bad.lock_max = 0;
+  check("init lock_max 0", ra_auth_init(&a0, &bad, &st) == RA_E_USAGE);
+  bad = cfg;
+  bad.lock_window = 0;
+  check("init lock_window 0", ra_auth_init(&a0, &bad, &st) == RA_E_USAGE);
+  bad = cfg;
+  bad.lock_for = 0;
+  check("init lock_for 0", ra_auth_init(&a0, &bad, &st) == RA_E_USAGE);
+  bad = cfg;
+  bad.pw_preset = 99;
+  check("init preset 99", ra_auth_init(&a0, &bad, &st) == RA_E_USAGE);
+
+  // ---- 2. set password ----
+  check("set ada", ra_set_password(&a, 1, "correct horse") == RA_OK);
+  check("set short", ra_set_password(&a, 1, "short") == RA_E_INVALID);
+  check("set owner 99", ra_set_password(&a, 99, "correct horse") == RA_E_NOT_FOUND);
+
+  // ---- 3. login ----
+  var cred: RaCredential;
+  check("cred ada", ra_store_cred_get(&st, "ada", &cred) == RA_OK);
+  var ada: int64 = cred.owner;
+  var owner: int64 = 77;
+  var now: int64 = 1000000;
+
+  check("login ok", ra_login(&a, "ada", "correct horse", now, &owner) == RA_OK);
+  check("login ok owner", owner == ada);
+  owner = 77;
+  check("login wrong", ra_login(&a, "ada", "correct horsf", now, &owner) == RA_E_DENIED);
+  check("login wrong owner 0", owner == 0);
+  owner = 77;
+  check("login unknown", ra_login(&a, "nobody", "correct horse", now, &owner) == RA_E_DENIED);
+  check("login unknown owner 0", owner == 0);
+  check("login empty", ra_login(&a, "", "correct horse", now, &owner) == RA_E_USAGE);
+  var long_login: string = "a";
+  var li: int32 = 0;
+  while (li < 8) { long_login = long_login + long_login; li = li + 1; }
+  check("login 256 ok length", long_login.length == 256);
+  long_login = long_login + "a";
+  check("login 257 length", long_login.length == 257);
+  owner = 77;
+  check("login 257 bytes", ra_login(&a, long_login, "correct horse", now, &owner) == RA_E_USAGE);
+  check("login 257 owner 0", owner == 0);
+  check("login null owner", ra_login(&a, "ada", "correct horse", now, (int64*)0) == RA_E_USAGE);
+  check("set bob", ra_set_password(&a, 2, "correct horse") == RA_OK);
+  owner = 77;
+  check("login disabled", ra_login(&a, "bob", "correct horse", now, &owner) == RA_E_DENIED);
+  check("login disabled owner 0", owner == 0);
+
+  // ---- 4. lockout (lock_max 3, window 100, lock_for 50) ----
+  var lcfg: RaConfig;
+  ra_config_defaults(&lcfg);
+  lcfg.lock_max = 3;
+  lcfg.lock_window = 100;
+  lcfg.lock_for = 50;
+  var db4: TstDb;
+  tst_init(&db4);
+  var st4: RaStore;
+  tst_bind(&st4, &db4);
+  var l: RaAuth;
+  check("lock fresh", fresh(&l, &st4, &lcfg));
+  check("lock wrong 1", ra_login(&l, "ada", "wrong one", 1000, &owner) == RA_E_DENIED);
+  check("lock wrong 2", ra_login(&l, "ada", "wrong one", 1000, &owner) == RA_E_DENIED);
+  check("lock wrong 3", ra_login(&l, "ada", "wrong one", 1000, &owner) == RA_E_DENIED);
+  owner = 77;
+  check("locked with right pw", ra_login(&l, "ada", "correct horse", 1001, &owner) == RA_E_LOCKED);
+  check("locked owner 0", owner == 0);
+  check("locked until 1049", ra_login(&l, "ada", "correct horse", 1049, &owner) == RA_E_LOCKED);
+  check("lock over", ra_login(&l, "ada", "correct horse", 1050, &owner) == RA_OK);
+  check("lock over owner", owner == ada);
+
+  // Success clears the counter: 2 wrong, 1 right, 2 wrong -> not locked.
+  check("clr wrong 1", ra_login(&l, "ada", "wrong one", 3000, &owner) == RA_E_DENIED);
+  check("clr wrong 2", ra_login(&l, "ada", "wrong one", 3000, &owner) == RA_E_DENIED);
+  check("clr right", ra_login(&l, "ada", "correct horse", 3000, &owner) == RA_OK);
+  check("clr wrong 3", ra_login(&l, "ada", "wrong one", 3000, &owner) == RA_E_DENIED);
+  check("clr wrong 4", ra_login(&l, "ada", "wrong one", 3000, &owner) == RA_E_DENIED);
+  check("clr right again", ra_login(&l, "ada", "correct horse", 3000, &owner) == RA_OK);
+
+  // ---- 5. window ----
+  check("win wrong 1", ra_login(&l, "ada", "wrong one", 2000, &owner) == RA_E_DENIED);
+  check("win wrong 2", ra_login(&l, "ada", "wrong one", 2000, &owner) == RA_E_DENIED);
+  check("win wrong 3 after window", ra_login(&l, "ada", "wrong one", 2100, &owner) == RA_E_DENIED);
+  check("win right not locked", ra_login(&l, "ada", "correct horse", 2100, &owner) == RA_OK);
+
+  // ---- 6. unknown logins lock too ----
+  check("unk wrong 1", ra_login(&l, "nobody", "wrong one", 5000, &owner) == RA_E_DENIED);
+  check("unk wrong 2", ra_login(&l, "nobody", "wrong one", 5000, &owner) == RA_E_DENIED);
+  check("unk wrong 3", ra_login(&l, "nobody", "wrong one", 5000, &owner) == RA_E_DENIED);
+  check("unk locked", ra_login(&l, "nobody", "wrong one", 5001, &owner) == RA_E_LOCKED);
+  check("unk clear", ra_lockout_clear(&l, "nobody") == RA_OK);
+  check("unk after clear", ra_login(&l, "nobody", "wrong one", 5002, &owner) == RA_E_DENIED);
+  check("clear no counter", ra_lockout_clear(&l, "never-seen") == RA_OK);
+  check("clear empty login", ra_lockout_clear(&l, "") == RA_E_USAGE);
+
+  // ---- 7. rehash (MODERATE is slow: once) ----
+  var db7: TstDb;
+  tst_init(&db7);
+  var st7: RaStore;
+  tst_bind(&st7, &db7);
+  var icfg: RaConfig;
+  ra_config_defaults(&icfg);
+  var ia: RaAuth;
+  check("rehash fresh", fresh(&ia, &st7, &icfg));
+  var c0: RaCredential;
+  check("rehash cred before", ra_store_cred_get(&st7, "ada", &c0) == RA_OK);
+  check("rehash needed before", ra_password_needs_rehash(&c0.hash, CR_PW_MODERATE));
+  var mcfg: RaConfig;
+  ra_config_defaults(&mcfg);
+  mcfg.pw_preset = CR_PW_MODERATE;
+  var ma: RaAuth;
+  check("rehash init moderate", ra_auth_init(&ma, &mcfg, &st7) == RA_OK);
+  check("rehash login", ra_login(&ma, "ada", "correct horse", 9000, &owner) == RA_OK);
+  var c1: RaCredential;
+  check("rehash cred after", ra_store_cred_get(&st7, "ada", &c1) == RA_OK);
+  check("rehash not needed after", !ra_password_needs_rehash(&c1.hash, CR_PW_MODERATE));
+  check("rehash still verifies", ra_password_verify(&c1.hash, "correct horse"));
+  check("rehash owner kept", c1.owner == 1);
+
+  if (g_fail != 0) { println("login: {g_fail} failed"); return 1; }
+  println("OK login");
+  return 0;
+}

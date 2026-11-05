@@ -12,5 +12,5 @@ fn project() {
 }
 
 fn deps() {
-  mb_dep_path("crypto", "../cryptex");
+  mb_dep_path("crypto", "../../../cryptex");
 }

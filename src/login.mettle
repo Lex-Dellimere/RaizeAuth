@@ -11,7 +11,7 @@
 // and get the same RA_E_DENIED, so sign-in does not reveal which logins exist.
 
 import "std/mem";
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "status";
 import "password";
 import "store";

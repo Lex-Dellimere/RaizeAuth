@@ -36,7 +36,7 @@
 
 import "std/mem";
 import "std/conv";
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "status";
 
 /// Longest token scope, in bytes (space-separated scope names).

@@ -2,7 +2,7 @@
 // raize_auth feature takes. Build one at startup with ra_auth_init.
 
 import "std/mem";
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "status";
 import "password";
 import "store";
